@@ -1,6 +1,6 @@
 {
   "variables": {
-    "aws_region": "us-west-2",
+    "aws_region": "eu-central-1",
     "ami_name": null,
     "creator": "{{env `USER`}}",
     "encrypted": "false",
@@ -52,9 +52,7 @@
           "state": "available",
           "virtualization-type": "hvm"
         },
-        "owners": [
-          "{{user `source_ami_owners`}}"
-        ],
+        "owners": ["{{user `source_ami_owners`}}"],
         "most_recent": true
       },
       "instance_type": "{{user `instance_type`}}",
@@ -122,9 +120,7 @@
       "type": "shell",
       "pause_before": "90s",
       "remote_folder": "{{ user `remote_folder`}}",
-      "inline": [
-        "mkdir -p /tmp/worker/"
-      ]
+      "inline": ["mkdir -p /tmp/worker/"]
     },
     {
       "type": "file",
@@ -164,9 +160,7 @@
       "type": "shell",
       "remote_folder": "{{ user `remote_folder`}}",
       "script": "{{template_dir}}/scripts/validate.sh",
-      "environment_vars": [
-        "KERNEL_VERSION={{user `kernel_version`}}"
-      ]
+      "environment_vars": ["KERNEL_VERSION={{user `kernel_version`}}"]
     }
   ],
   "post-processors": [

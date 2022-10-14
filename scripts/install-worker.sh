@@ -46,6 +46,13 @@ else
 fi
 
 ################################################################################
+### Utilities ##################################################################
+################################################################################
+
+sudo chmod -R a+x $TEMPLATE_DIR/bin/
+sudo mv $TEMPLATE_DIR/bin/* /usr/bin/
+
+################################################################################
 ### Packages ###################################################################
 ################################################################################
 
@@ -159,7 +166,7 @@ else
     sudo mv $TEMPLATE_DIR/containerd-config.toml /etc/eks/containerd/containerd-config.toml
 fi
 
-if [[ ! $KUBERNETES_VERSION =~ "1.19"* || ! $KUBERNETES_VERSION =~ "1.20"* || ! $KUBERNETES_VERSION =~ "1.21"* ]]; then
+if [[ ! $KUBERNETES_VERSION =~ "1.19"* && ! $KUBERNETES_VERSION =~ "1.20"* && ! $KUBERNETES_VERSION =~ "1.21"* ]]; then
     # enable CredentialProviders features in kubelet-containerd service file
     IMAGE_CREDENTIAL_PROVIDER_FLAGS='\\\n    --image-credential-provider-config /etc/eks/ecr-credential-provider/ecr-credential-provider-config \\\n   --image-credential-provider-bin-dir /etc/eks/ecr-credential-provider'
     sudo sed -i s,"aws","aws $IMAGE_CREDENTIAL_PROVIDER_FLAGS", $TEMPLATE_DIR/kubelet-containerd.service
@@ -272,7 +279,7 @@ if [[ $KUBERNETES_VERSION == "1.20"* ]]; then
     echo $KUBELET_CONFIG_WITH_CSI_SERVICE_ACCOUNT_TOKEN_ENABLED > $TEMPLATE_DIR/kubelet-config.json
 fi
 
-if [[ ! $KUBERNETES_VERSION =~ "1.19"* || ! $KUBERNETES_VERSION =~ "1.20"* || ! $KUBERNETES_VERSION =~ "1.21"* ]]; then
+if [[ ! $KUBERNETES_VERSION =~ "1.19"* && ! $KUBERNETES_VERSION =~ "1.20"* && ! $KUBERNETES_VERSION =~ "1.21"* ]]; then
     # enable CredentialProviders feature flags in kubelet service file
     IMAGE_CREDENTIAL_PROVIDER_FLAGS='\\\n    --image-credential-provider-config /etc/eks/ecr-credential-provider/ecr-credential-provider-config \\\n    --image-credential-provider-bin-dir /etc/eks/ecr-credential-provider'
     sudo sed -i s,"aws","aws $IMAGE_CREDENTIAL_PROVIDER_FLAGS", $TEMPLATE_DIR/kubelet.service
@@ -311,7 +318,7 @@ fi
 ################################################################################
 ### ECR CREDENTIAL PROVIDER ####################################################
 ################################################################################
-if [[ ! $KUBERNETES_VERSION =~ "1.19"* || ! $KUBERNETES_VERSION =~ "1.20"* || ! $KUBERNETES_VERSION =~ "1.21"* ]]; then
+if [[ ! $KUBERNETES_VERSION =~ "1.19"* && ! $KUBERNETES_VERSION =~ "1.20"* && ! $KUBERNETES_VERSION =~ "1.21"* ]]; then
     ECR_BINARY="ecr-credential-provider"
     if [[ -n "$AWS_ACCESS_KEY_ID" ]]; then
         echo "AWS cli present - using it to copy ecr-credential-provider binaries from s3."
@@ -338,7 +345,7 @@ sudo yum install -y amazon-ssm-agent
 ### AMI Metadata ###############################################################
 ################################################################################
 
-BASE_AMI_ID=$(curl -s  http://169.254.169.254/latest/meta-data/ami-id)
+BASE_AMI_ID=$(imds /latest/meta-data/ami-id)
 cat <<EOF > /tmp/release
 BASE_AMI_ID="$BASE_AMI_ID"
 BUILD_TIME="$(date)"
@@ -380,34 +387,5 @@ sudo yum install wireguard-dkms wireguard-tools -y
 ################################################################################
 ### Cleanup ####################################################################
 ################################################################################
-
-CLEANUP_IMAGE="${CLEANUP_IMAGE:-true}"
-if [[ "$CLEANUP_IMAGE" == "true" ]]; then
-    # Clean up yum caches to reduce the image size
-    sudo yum clean all
-    sudo rm -rf \
-        $TEMPLATE_DIR  \
-        /var/cache/yum
-
-    # Clean up files to reduce confusion during debug
-    sudo rm -rf \
-        /etc/hostname \
-        /etc/machine-id \
-        /etc/resolv.conf \
-        /etc/ssh/ssh_host* \
-        /home/ec2-user/.ssh/authorized_keys \
-        /root/.ssh/authorized_keys \
-        /var/lib/cloud/data \
-        /var/lib/cloud/instance \
-        /var/lib/cloud/instances \
-        /var/lib/cloud/sem \
-        /var/lib/dhclient/* \
-        /var/lib/dhcp/dhclient.* \
-        /var/lib/yum/history \
-        /var/log/cloud-init-output.log \
-        /var/log/cloud-init.log \
-        /var/log/secure \
-        /var/log/wtmp
-fi
-
-sudo touch /etc/machine-id
+sudo mkdir -p /etc/eks/log-collector-script/
+sudo cp $TEMPLATE_DIR/log-collector-script/eks-log-collector.sh /etc/eks/log-collector-script/

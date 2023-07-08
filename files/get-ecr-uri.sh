@@ -27,6 +27,9 @@ else
     us-gov-east-1)
       acct="151742754352"
       ;;
+    us-iso-west-1)
+      acct="608367168043"
+      ;;
     us-iso-east-1)
       acct="725322719131"
       ;;
@@ -53,6 +56,12 @@ else
       ;;
     ap-south-2)
       acct="900889452093"
+      ;;
+    ap-southeast-4)
+      acct="491585149902"
+      ;;
+    il-central-1)
+      acct="066635153087"
       ;;
     *)
       acct="602401143452"

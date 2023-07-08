@@ -6,8 +6,6 @@ set -o errexit
 IFS=$'\n\t'
 export AWS_DEFAULT_OUTPUT="json"
 
-TEMPLATE_DIR=${TEMPLATE_DIR:-/tmp/worker}
-
 ################################################################################
 ### Validate Required Arguments ################################################
 ################################################################################
@@ -33,6 +31,7 @@ validate_env_set KUBERNETES_BUILD_DATE
 validate_env_set PULL_CNI_FROM_GITHUB
 validate_env_set PAUSE_CONTAINER_VERSION
 validate_env_set CACHE_CONTAINER_IMAGES
+validate_env_set WORKING_DIR
 
 ################################################################################
 ### Machine Architecture #######################################################
@@ -49,13 +48,6 @@ else
 fi
 
 ################################################################################
-### Utilities ##################################################################
-################################################################################
-
-sudo chmod -R a+x $TEMPLATE_DIR/bin/
-sudo mv $TEMPLATE_DIR/bin/* /usr/bin/
-
-################################################################################
 ### Packages ###################################################################
 ################################################################################
 
@@ -69,42 +61,33 @@ sudo yum install -y \
   conntrack \
   curl \
   ec2-instance-connect \
+  ethtool \
   ipvsadm \
   jq \
   nfs-utils \
   socat \
   unzip \
   wget \
+  yum-utils \
   yum-plugin-versionlock \
-  yum-utils
+  mdadm \
+  pigz
 
 # Remove any old kernel versions. `--count=1` here means "only leave 1 kernel version installed"
 sudo package-cleanup --oldkernels --count=1 -y
 
+sudo yum versionlock kernel-$(uname -r)
+
 # Remove the ec2-net-utils package, if it's installed. This package interferes with the route setup on the instance.
 if yum list installed | grep ec2-net-utils; then sudo yum remove ec2-net-utils -y -q; fi
+
+sudo mkdir -p /etc/eks/
 
 ################################################################################
 ### Time #######################################################################
 ################################################################################
 
-# Make sure Amazon Time Sync Service starts on boot.
-sudo chkconfig chronyd on
-
-# Make sure that chronyd syncs RTC clock to the kernel.
-cat << EOF | sudo tee -a /etc/chrony.conf
-# This directive enables kernel synchronisation (every 11 minutes) of the
-# real-time clock. Note that it can’t be used along with the 'rtcfile' directive.
-rtcsync
-EOF
-
-# If current clocksource is xen, switch to tsc
-if grep --quiet xen /sys/devices/system/clocksource/clocksource0/current_clocksource \
-  && grep --quiet tsc /sys/devices/system/clocksource/clocksource0/available_clocksource; then
-  echo "tsc" | sudo tee /sys/devices/system/clocksource/clocksource0/current_clocksource
-else
-  echo "tsc as a clock source is not applicable, skipping."
-fi
+sudo mv $WORKING_DIR/configure-clocksource.service /etc/eks/configure-clocksource.service
 
 ################################################################################
 ### SSH ########################################################################
@@ -117,17 +100,20 @@ sudo systemctl restart sshd.service
 ################################################################################
 ### iptables ###################################################################
 ################################################################################
-sudo mkdir -p /etc/eks
-sudo mv $TEMPLATE_DIR/iptables-restore.service /etc/eks/iptables-restore.service
+
+sudo mv $WORKING_DIR/iptables-restore.service /etc/eks/iptables-restore.service
 
 ################################################################################
 ### awscli #####################################################
 ################################################################################
 
-if [[ "$BINARY_BUCKET_REGION" != "us-iso-east-1" && "$BINARY_BUCKET_REGION" != "us-isob-east-1" ]]; then
+### isolated regions can't communicate to awscli.amazonaws.com so installing awscli through yum
+ISOLATED_REGIONS="${ISOLATED_REGIONS:-us-iso-east-1 us-iso-west-1 us-isob-east-1}"
+if ! [[ ${ISOLATED_REGIONS} =~ $BINARY_BUCKET_REGION ]]; then
   # https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html
   echo "Installing awscli v2 bundle"
-  AWSCLI_DIR=$(mktemp -d)
+  AWSCLI_DIR="${WORKING_DIR}/awscli-install"
+  mkdir "${AWSCLI_DIR}"
   curl \
     --silent \
     --show-error \
@@ -135,11 +121,17 @@ if [[ "$BINARY_BUCKET_REGION" != "us-iso-east-1" && "$BINARY_BUCKET_REGION" != "
     --retry-delay 1 \
     -L "https://awscli.amazonaws.com/awscli-exe-linux-${MACHINE}.zip" -o "${AWSCLI_DIR}/awscliv2.zip"
   unzip -q "${AWSCLI_DIR}/awscliv2.zip" -d ${AWSCLI_DIR}
-  sudo "${AWSCLI_DIR}/aws/install" --bin-dir /bin/
+  sudo "${AWSCLI_DIR}/aws/install" --bin-dir /bin/ --update
 else
   echo "Installing awscli package"
   sudo yum install -y awscli
 fi
+
+################################################################################
+### systemd ####################################################################
+################################################################################
+
+sudo mv "${WORKING_DIR}/runtime.slice" /etc/systemd/system/runtime.slice
 
 ###############################################################################
 ### Containerd setup ##########################################################
@@ -158,19 +150,13 @@ if [ -f "/etc/eks/containerd/containerd-config.toml" ]; then
   ## this means we are building a gpu ami and have already placed a containerd configuration file in /etc/eks
   echo "containerd config is already present"
 else
-  sudo mv $TEMPLATE_DIR/containerd-config.toml /etc/eks/containerd/containerd-config.toml
+  sudo mv $WORKING_DIR/containerd-config.toml /etc/eks/containerd/containerd-config.toml
 fi
 
-if vercmp "$KUBERNETES_VERSION" gteq "1.22.0"; then
-  # enable CredentialProviders features in kubelet-containerd service file
-  IMAGE_CREDENTIAL_PROVIDER_FLAGS='\\\n    --image-credential-provider-config /etc/eks/ecr-credential-provider/ecr-credential-provider-config \\\n   --image-credential-provider-bin-dir /etc/eks/ecr-credential-provider'
-  sudo sed -i s,"aws","aws $IMAGE_CREDENTIAL_PROVIDER_FLAGS", $TEMPLATE_DIR/kubelet-containerd.service
-fi
-
-sudo mv $TEMPLATE_DIR/kubelet-containerd.service /etc/eks/containerd/kubelet-containerd.service
-sudo mv $TEMPLATE_DIR/sandbox-image.service /etc/eks/containerd/sandbox-image.service
-sudo mv $TEMPLATE_DIR/pull-sandbox-image.sh /etc/eks/containerd/pull-sandbox-image.sh
-sudo mv $TEMPLATE_DIR/pull-image.sh /etc/eks/containerd/pull-image.sh
+sudo mv $WORKING_DIR/kubelet-containerd.service /etc/eks/containerd/kubelet-containerd.service
+sudo mv $WORKING_DIR/sandbox-image.service /etc/eks/containerd/sandbox-image.service
+sudo mv $WORKING_DIR/pull-sandbox-image.sh /etc/eks/containerd/pull-sandbox-image.sh
+sudo mv $WORKING_DIR/pull-image.sh /etc/eks/containerd/pull-image.sh
 sudo chmod +x /etc/eks/containerd/pull-sandbox-image.sh
 sudo chmod +x /etc/eks/containerd/pull-image.sh
 
@@ -197,7 +183,12 @@ EOF
 
 sudo yum install -y device-mapper-persistent-data lvm2
 
-INSTALL_DOCKER="${INSTALL_DOCKER:-true}"
+if [[ ! -v "INSTALL_DOCKER" ]]; then
+  INSTALL_DOCKER=$(vercmp "$KUBERNETES_VERSION" lt "1.25.0" || true)
+else
+  echo "WARNING: using override INSTALL_DOCKER=${INSTALL_DOCKER}. This option is deprecated and will be removed in a future release."
+fi
+
 if [[ "$INSTALL_DOCKER" == "true" ]]; then
   sudo amazon-linux-extras enable docker
   sudo groupadd -og 1950 docker
@@ -212,7 +203,7 @@ if [[ "$INSTALL_DOCKER" == "true" ]]; then
   sudo sed -i '/OPTIONS/d' /etc/sysconfig/docker
 
   sudo mkdir -p /etc/docker
-  sudo mv $TEMPLATE_DIR/docker-daemon.json /etc/docker/daemon.json
+  sudo mv $WORKING_DIR/docker-daemon.json /etc/docker/daemon.json
   sudo chown root:root /etc/docker/daemon.json
 
   # Enable docker daemon to start on boot.
@@ -225,8 +216,8 @@ fi
 
 # kubelet uses journald which has built-in rotation and capped size.
 # See man 5 journald.conf
-sudo mv $TEMPLATE_DIR/logrotate-kube-proxy /etc/logrotate.d/kube-proxy
-sudo mv $TEMPLATE_DIR/logrotate.conf /etc/logrotate.conf
+sudo mv $WORKING_DIR/logrotate-kube-proxy /etc/logrotate.d/kube-proxy
+sudo mv $WORKING_DIR/logrotate.conf /etc/logrotate.conf
 sudo chown root:root /etc/logrotate.d/kube-proxy
 sudo chown root:root /etc/logrotate.conf
 sudo mkdir -p /var/log/journal
@@ -244,7 +235,7 @@ echo "Downloading binaries from: s3://$BINARY_BUCKET_NAME"
 S3_DOMAIN="amazonaws.com"
 if [ "$BINARY_BUCKET_REGION" = "cn-north-1" ] || [ "$BINARY_BUCKET_REGION" = "cn-northwest-1" ]; then
   S3_DOMAIN="amazonaws.com.cn"
-elif [ "$BINARY_BUCKET_REGION" = "us-iso-east-1" ]; then
+elif [ "$BINARY_BUCKET_REGION" = "us-iso-east-1" ] || [ "$BINARY_BUCKET_REGION" = "us-iso-west-1" ]; then
   S3_DOMAIN="c2s.ic.gov"
 elif [ "$BINARY_BUCKET_REGION" = "us-isob-east-1" ]; then
   S3_DOMAIN="sc2s.sgov.gov"
@@ -309,28 +300,19 @@ sudo rm ./*.sha256
 
 sudo mkdir -p /etc/kubernetes/kubelet
 sudo mkdir -p /etc/systemd/system/kubelet.service.d
-sudo mv $TEMPLATE_DIR/kubelet-kubeconfig /var/lib/kubelet/kubeconfig
+sudo mv $WORKING_DIR/kubelet-kubeconfig /var/lib/kubelet/kubeconfig
 sudo chown root:root /var/lib/kubelet/kubeconfig
 
 # Inject CSIServiceAccountToken feature gate to kubelet config if kubernetes version starts with 1.20.
 # This is only injected for 1.20 since CSIServiceAccountToken will be moved to beta starting 1.21.
 if [[ $KUBERNETES_VERSION == "1.20"* ]]; then
-  KUBELET_CONFIG_WITH_CSI_SERVICE_ACCOUNT_TOKEN_ENABLED=$(cat $TEMPLATE_DIR/kubelet-config.json | jq '.featureGates += {CSIServiceAccountToken: true}')
-  echo $KUBELET_CONFIG_WITH_CSI_SERVICE_ACCOUNT_TOKEN_ENABLED > $TEMPLATE_DIR/kubelet-config.json
+  KUBELET_CONFIG_WITH_CSI_SERVICE_ACCOUNT_TOKEN_ENABLED=$(cat $WORKING_DIR/kubelet-config.json | jq '.featureGates += {CSIServiceAccountToken: true}')
+  echo $KUBELET_CONFIG_WITH_CSI_SERVICE_ACCOUNT_TOKEN_ENABLED > $WORKING_DIR/kubelet-config.json
 fi
 
-if vercmp "$KUBERNETES_VERSION" gteq "1.22.0"; then
-  # enable CredentialProviders feature flags in kubelet service file
-  IMAGE_CREDENTIAL_PROVIDER_FLAGS='\\\n    --image-credential-provider-config /etc/eks/ecr-credential-provider/ecr-credential-provider-config \\\n    --image-credential-provider-bin-dir /etc/eks/ecr-credential-provider'
-  sudo sed -i s,"aws","aws $IMAGE_CREDENTIAL_PROVIDER_FLAGS", $TEMPLATE_DIR/kubelet.service
-  # enable KubeletCredentialProviders features in kubelet configuration
-  KUBELET_CREDENTIAL_PROVIDERS_FEATURES=$(cat $TEMPLATE_DIR/kubelet-config.json | jq '.featureGates += {KubeletCredentialProviders: true}')
-  printf "%s" "$KUBELET_CREDENTIAL_PROVIDERS_FEATURES" > "$TEMPLATE_DIR/kubelet-config.json"
-fi
-
-sudo mv $TEMPLATE_DIR/kubelet.service /etc/systemd/system/kubelet.service
+sudo mv $WORKING_DIR/kubelet.service /etc/systemd/system/kubelet.service
 sudo chown root:root /etc/systemd/system/kubelet.service
-sudo mv $TEMPLATE_DIR/kubelet-config.json /etc/kubernetes/kubelet/kubelet-config.json
+sudo mv $WORKING_DIR/kubelet-config.json /etc/kubernetes/kubelet/kubelet-config.json
 sudo chown root:root /etc/kubernetes/kubelet/kubelet-config.json
 
 sudo systemctl daemon-reload
@@ -342,44 +324,41 @@ sudo systemctl disable kubelet
 ################################################################################
 
 sudo mkdir -p /etc/eks
-sudo mv $TEMPLATE_DIR/get-ecr-uri.sh /etc/eks/get-ecr-uri.sh
+sudo mv $WORKING_DIR/get-ecr-uri.sh /etc/eks/get-ecr-uri.sh
 sudo chmod +x /etc/eks/get-ecr-uri.sh
-sudo mv $TEMPLATE_DIR/eni-max-pods.txt /etc/eks/eni-max-pods.txt
-sudo mv $TEMPLATE_DIR/bootstrap.sh /etc/eks/bootstrap.sh
+sudo mv $WORKING_DIR/eni-max-pods.txt /etc/eks/eni-max-pods.txt
+sudo mv $WORKING_DIR/bootstrap.sh /etc/eks/bootstrap.sh
 sudo chmod +x /etc/eks/bootstrap.sh
-sudo mv $TEMPLATE_DIR/max-pods-calculator.sh /etc/eks/max-pods-calculator.sh
+sudo mv $WORKING_DIR/max-pods-calculator.sh /etc/eks/max-pods-calculator.sh
 sudo chmod +x /etc/eks/max-pods-calculator.sh
 
 SONOBUOY_E2E_REGISTRY="${SONOBUOY_E2E_REGISTRY:-}"
 if [[ -n "$SONOBUOY_E2E_REGISTRY" ]]; then
-  sudo mv $TEMPLATE_DIR/sonobuoy-e2e-registry-config /etc/eks/sonobuoy-e2e-registry-config
+  sudo mv $WORKING_DIR/sonobuoy-e2e-registry-config /etc/eks/sonobuoy-e2e-registry-config
   sudo sed -i s,SONOBUOY_E2E_REGISTRY,$SONOBUOY_E2E_REGISTRY,g /etc/eks/sonobuoy-e2e-registry-config
 fi
 
 ################################################################################
 ### ECR CREDENTIAL PROVIDER ####################################################
 ################################################################################
-if vercmp "$KUBERNETES_VERSION" gteq "1.22.0"; then
-  ECR_BINARY="ecr-credential-provider"
-  if [[ -n "$AWS_ACCESS_KEY_ID" ]]; then
-    echo "AWS cli present - using it to copy ecr-credential-provider binaries from s3."
-    aws s3 cp --region $BINARY_BUCKET_REGION $S3_PATH/$ECR_BINARY .
-  else
-    echo "AWS cli missing - using wget to fetch ecr-credential-provider binaries from s3. Note: This won't work for private bucket."
-    sudo wget "$S3_URL_BASE/$ECR_BINARY"
-  fi
-  sudo chmod +x $ECR_BINARY
-  sudo mkdir -p /etc/eks/ecr-credential-provider
-  sudo mv $ECR_BINARY /etc/eks/ecr-credential-provider
-
-  # copying credential provider config file to eks folder
-  sudo mv $TEMPLATE_DIR/ecr-credential-provider-config /etc/eks/ecr-credential-provider/ecr-credential-provider-config
+ECR_CREDENTIAL_PROVIDER_BINARY="ecr-credential-provider"
+if [[ -n "$AWS_ACCESS_KEY_ID" ]]; then
+  echo "AWS cli present - using it to copy ${ECR_CREDENTIAL_PROVIDER_BINARY} from s3."
+  aws s3 cp --region $BINARY_BUCKET_REGION $S3_PATH/$ECR_CREDENTIAL_PROVIDER_BINARY .
+else
+  echo "AWS cli missing - using wget to fetch ${ECR_CREDENTIAL_PROVIDER_BINARY} from s3. Note: This won't work for private bucket."
+  sudo wget "$S3_URL_BASE/$ECR_CREDENTIAL_PROVIDER_BINARY"
 fi
+sudo chmod +x $ECR_CREDENTIAL_PROVIDER_BINARY
+sudo mkdir -p /etc/eks/image-credential-provider
+sudo mv $ECR_CREDENTIAL_PROVIDER_BINARY /etc/eks/image-credential-provider/
+sudo mv $WORKING_DIR/ecr-credential-provider-config.json /etc/eks/image-credential-provider/config.json
 
 ################################################################################
 ### Cache Images ###############################################################
 ################################################################################
-if [[ "$CACHE_CONTAINER_IMAGES" == "true" && "$BINARY_BUCKET_REGION" != "us-iso-east-1" && "$BINARY_BUCKET_REGION" != "us-isob-east-1" ]]; then
+
+if [[ "$CACHE_CONTAINER_IMAGES" == "true" ]] && ! [[ ${ISOLATED_REGIONS} =~ $BINARY_BUCKET_REGION ]]; then
   AWS_DOMAIN=$(imds 'latest/meta-data/services/domain')
   ECR_URI=$(/etc/eks/get-ecr-uri.sh "${BINARY_BUCKET_REGION}" "${AWS_DOMAIN}")
 
@@ -496,13 +475,13 @@ sudo yum install -y amazon-ssm-agent
 ################################################################################
 
 BASE_AMI_ID=$(imds /latest/meta-data/ami-id)
-cat << EOF > /tmp/release
+cat << EOF > "${WORKING_DIR}/release"
 BASE_AMI_ID="$BASE_AMI_ID"
 BUILD_TIME="$(date)"
 BUILD_KERNEL="$(uname -r)"
 ARCH="$(uname -m)"
 EOF
-sudo mv /tmp/release /etc/eks/release
+sudo mv "${WORKING_DIR}/release" /etc/eks/release
 sudo chown -R root:root /etc/eks
 
 ################################################################################
@@ -537,7 +516,7 @@ sudo yum install wireguard-dkms wireguard-tools -y
 ### Cleanup ####################################################################
 ################################################################################
 sudo mkdir -p /etc/eks/log-collector-script/
-sudo cp $TEMPLATE_DIR/log-collector-script/eks-log-collector.sh /etc/eks/log-collector-script/
+sudo cp $WORKING_DIR/log-collector-script/eks-log-collector.sh /etc/eks/log-collector-script/
 
 ################################################################################
 ### Remove Yum Update from cloud-init config ###################################
